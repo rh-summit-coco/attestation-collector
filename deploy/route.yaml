@@ -1,0 +1,15 @@
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: attestation-collector
+  labels:
+    app: attestation-collector
+spec:
+  to:
+    kind: Service
+    name: attestation-collector
+  port:
+    targetPort: http
+  tls:
+    termination: edge
+    insecureEdgeTerminationPolicy: Redirect

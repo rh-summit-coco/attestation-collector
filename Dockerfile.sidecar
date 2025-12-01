@@ -1,0 +1,20 @@
+# Attestation Reporter Sidecar
+# Build stage
+FROM golang:1.21-alpine AS builder
+
+WORKDIR /build
+
+COPY sidecar/main.go ./
+RUN go mod init attestation-sidecar && \
+    CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o attestation-reporter .
+
+# Runtime stage - minimal image
+FROM alpine:latest
+
+RUN apk --no-cache add ca-certificates
+
+WORKDIR /app
+
+COPY --from=builder /build/attestation-reporter .
+
+ENTRYPOINT ["/app/attestation-reporter"]
