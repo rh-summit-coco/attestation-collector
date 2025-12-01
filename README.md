@@ -5,13 +5,13 @@
 ## Architecture
 
 ```
-┌─────────────────────────┐    HTTP POST     ┌─────────────────────────┐
-│ CoCo Pod (TEE)          │    every 30s     │ Attestation Collector   │
+┌─────────────────────────┐  mTLS + JWT      ┌─────────────────────────┐
+│ CoCo Pod (TEE)          │  signed reports  │ Attestation Collector   │
 │ ├─ hospital-app         │ ─────────────────▶│ API Service             │
-│ └─ CoCo Beacon Sidecar  │  attestation     │ (In-memory storage)     │
-└─────────────────────────┘  reports         └─────────────────────────┘
+│ └─ CoCo Beacon Sidecar  │  every 30s       │ (Secure verification)   │
+└─────────────────────────┘  port 8443       └─────────────────────────┘
                                                         │
-                                                        │ HTTP GET
+                                                        │ HTTPS GET
                                                         ▼
                                               ┌─────────────────────────┐
                                               │ RAJ Hospital Dashboard  │
@@ -23,23 +23,27 @@
 
 ### 1. CoCo Beacon Sidecar (`sidecar/`)
 - **Purpose**: Reports attestation status from individual CoCo pods
-- **Method**: Checks CDH (Confidential Data Hub) availability as attestation proof
+- **Method**: Verifies KBS JWT tokens from Trustee for cryptographic attestation proof
+- **Security**: RSA-signed attestation reports + mTLS client authentication
 - **Frequency**: Configurable interval (default: 30 seconds)
-- **Output**: EAR-compliant trust vectors
+- **Output**: JWT-signed EAR-compliant trust vectors
 
 ### 2. Attestation Collector (`main.go`)
-- **Purpose**: Central API service for collecting and serving attestation reports
+- **Purpose**: Central API service for collecting and verifying attestation reports
+- **Security**: mTLS server with client certificate verification + RSA signature verification
 - **Storage**: In-memory with historical data (last 100 reports per pod)
 - **API**: RESTful endpoints for reports, health checks, and individual pod queries
-- **Features**: Thread-safe, CORS-enabled for dashboard access
+- **Features**: Thread-safe, CORS-enabled, backward compatible with unsigned reports
 
 ## Quick Start
 
-### Deploy Collector
+### Deploy Collector (S2I Build)
 ```bash
-# Build and deploy collector
-make build
-kubectl apply -f deploy/collector.yaml
+# Create BuildConfig for automatic deployment from Git
+oc apply -f deploy/buildconfig-collector.yaml
+
+# Or trigger manual build
+oc start-build attestation-collector-secure -n raj-compliance-dashboard
 ```
 
 ### Add Sidecar to CoCo Pods
@@ -47,7 +51,7 @@ kubectl apply -f deploy/collector.yaml
 spec:
   containers:
   - name: coco-beacon-sidecar
-    image: quay.io/jensfr/attestation-sidecar:latest
+    image: quay.io/jensfr/attestation-sidecar:secure
     env:
     - name: POD_NAME
       valueFrom:
@@ -58,11 +62,25 @@ spec:
         fieldRef:
           fieldPath: metadata.namespace
     - name: COLLECTOR_URL
-      value: "http://attestation-collector:8080"
+      value: "https://attestation-collector:8443"
     - name: TEE_TYPE
       value: "tdx"
     - name: REPORT_INTERVAL
       value: "30"
+    - name: CLIENT_CERT_FILE
+      value: "/etc/certs/client.crt"
+    - name: CLIENT_KEY_FILE
+      value: "/etc/certs/client.key"
+    - name: CA_CERT_FILE
+      value: "/etc/certs/ca.crt"
+    volumeMounts:
+    - name: client-certs
+      mountPath: /etc/certs
+      readOnly: true
+  volumes:
+  - name: client-certs
+    secret:
+      secretName: attestation-client-certs
 ```
 
 ## API Reference
@@ -164,16 +182,18 @@ This project is part of the **Red Hat Summit Confidential Computing Demo**, demo
 
 ## Security Considerations
 
-⚠️ **Current Implementation**: Demo/PoC level security
-- Plain HTTP communication
-- No authentication/authorization
-- Trust-based report acceptance
+✅ **Current Implementation**: Production-grade security
+- **mTLS communication** with client certificate authentication
+- **RSA-signed attestation reports** with cryptographic verification
+- **KBS JWT token validation** for real attestation proof
+- **Backward compatibility** for gradual migration from unsigned reports
 
-🔒 **Production Requirements**:
-- mTLS with attestation-based certificates
-- Cryptographically signed reports
-- Integration with external attestation services (Rekor, etc.)
-- Secure storage backends
+🔒 **Security Features**:
+- **Transport Security**: Mutual TLS (mTLS) on port 8443
+- **Message Integrity**: RSA-PKCS1v15 signatures with SHA256 hashing
+- **Attestation Verification**: Trustee KBS JWT token validation
+- **Defense in Depth**: Both transport and application layer security
+- **Enterprise Ready**: Supports certificate management and key rotation
 
 ## License
 
