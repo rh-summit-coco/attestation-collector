@@ -1,0 +1,53 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: attestation-collector-secure
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-secure
+    app.kubernetes.io/component: attestation-collector
+    app.kubernetes.io/instance: attestation-collector-secure
+    app.kubernetes.io/name: attestation-collector
+spec:
+  failedBuildsHistoryLimit: 5
+  output:
+    to:
+      kind: ImageStreamTag
+      name: attestation-collector-secure:latest
+  postCommit: {}
+  resources: {}
+  runPolicy: Serial
+  source:
+    git:
+      uri: https://github.com/rh-summit-coco/attestation-collector.git
+      ref: main
+    type: Git
+    contextDir: .
+  strategy:
+    dockerStrategy:
+      dockerfilePath: Dockerfile.collector
+    type: Docker
+  successfulBuildsHistoryLimit: 5
+  triggers:
+  - github:
+      secret: secure-collector-webhook-secret
+    type: GitHub
+  - generic:
+      secret: secure-collector-generic-secret
+    type: Generic
+  - type: ConfigChange
+  - imageChange: {}
+    type: ImageChange
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: attestation-collector-secure
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-secure
+    app.kubernetes.io/component: attestation-collector
+    app.kubernetes.io/instance: attestation-collector-secure
+spec:
+  lookupPolicy:
+    local: false

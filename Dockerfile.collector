@@ -1,0 +1,51 @@
+# Secure Attestation Collector - mTLS + JWT-signed reports
+FROM registry.access.redhat.com/ubi9/go-toolset:1.21-8.1699551733 AS builder
+
+# Set working directory
+WORKDIR /opt/app-root/src
+
+# Copy go mod files
+COPY go.mod go.sum ./
+
+# Download dependencies
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Build the collector application
+RUN go build -o attestation-collector .
+
+# Final stage - use UBI9 minimal for security
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Install ca-certificates for TLS
+RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
+
+# Create non-root user
+RUN useradd -r -u 1001 -g root attestation
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder stage
+COPY --from=builder /opt/app-root/src/attestation-collector .
+
+# Create directories for certificates (to be mounted)
+RUN mkdir -p /etc/certs && chown attestation:root /etc/certs
+
+# Switch to non-root user
+USER attestation
+
+# Expose both HTTP and HTTPS ports
+EXPOSE 8080 8443
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8080/api/v1/health || exit 1
+
+# Set environment defaults
+ENV PORT=8080
+
+# Run the collector
+ENTRYPOINT ["./attestation-collector"]

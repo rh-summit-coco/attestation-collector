@@ -8,10 +8,18 @@ and provides a unified API for Raj's compliance dashboard.
 ## Components
 
 ```
-┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
-│   CoCo Pods     │     │   Collector     │     │   Dashboard     │
-│   (sidecar)     │────▶│   (this)        │────▶│   (Raj's UI)    │
-└─────────────────┘     └─────────────────┘     └─────────────────┘
+┌─────────────────────────┐  mTLS + JWT      ┌─────────────────────────┐
+│ CoCo Pods (TEE)         │  Port 8443       │ Collector (Secure)      │
+│ ├─ hospital-app         │ ────────────────▶│ ├─ Signature Verify     │
+│ └─ CoCo Beacon Sidecar  │  Signed Reports  │ └─ mTLS Server          │
+└─────────────────────────┘  X.509 Certs    └─────────────────────────┘
+                                                        │
+                                                        │ HTTPS API
+                                                        ▼
+                                              ┌─────────────────────────┐
+                                              │ RAJ Hospital Dashboard  │
+                                              │ (Live Security Status)  │
+                                              └─────────────────────────┘
 ```
 
 ## Collector API

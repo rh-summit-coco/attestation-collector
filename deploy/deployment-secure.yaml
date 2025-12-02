@@ -1,0 +1,117 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attestation-collector-secure
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-secure
+    app.kubernetes.io/name: attestation-collector
+    app.kubernetes.io/instance: attestation-collector-secure
+    app.kubernetes.io/component: collector
+    app.kubernetes.io/part-of: coco-beacon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attestation-collector-secure
+  template:
+    metadata:
+      labels:
+        app: attestation-collector-secure
+        app.kubernetes.io/name: attestation-collector
+        app.kubernetes.io/instance: attestation-collector-secure
+        app.kubernetes.io/component: collector
+    spec:
+      containers:
+      - name: attestation-collector
+        image: image-registry.openshift-image-registry.svc:5000/raj-compliance-dashboard/attestation-collector-secure:latest
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 8443
+          name: https
+          protocol: TCP
+        env:
+        - name: PORT
+          value: "8080"
+        volumeMounts:
+        - name: server-certs
+          mountPath: /etc/certs
+          readOnly: true
+        livenessProbe:
+          httpGet:
+            path: /api/v1/health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /api/v1/ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        securityContext:
+          allowPrivilegeEscalation: false
+          runAsNonRoot: true
+          runAsUser: 1001
+          capabilities:
+            drop:
+            - ALL
+      volumes:
+      - name: server-certs
+        secret:
+          secretName: attestation-server-certs
+          defaultMode: 0400
+      securityContext:
+        fsGroup: 1001
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: attestation-collector-secure
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-secure
+    app.kubernetes.io/name: attestation-collector
+    app.kubernetes.io/instance: attestation-collector-secure
+spec:
+  type: ClusterIP
+  ports:
+  - port: 8080
+    targetPort: 8080
+    protocol: TCP
+    name: http
+  - port: 8443
+    targetPort: 8443
+    protocol: TCP
+    name: https
+  selector:
+    app: attestation-collector-secure
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: attestation-collector-secure
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-secure
+spec:
+  to:
+    kind: Service
+    name: attestation-collector-secure
+  port:
+    targetPort: https
+  tls:
+    termination: passthrough
+    insecureEdgeTerminationPolicy: Redirect
