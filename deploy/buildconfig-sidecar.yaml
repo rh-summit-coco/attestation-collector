@@ -18,20 +18,13 @@ spec:
   resources: {}
   runPolicy: Serial
   source:
-    git:
-      uri: https://github.com/rh-summit-coco/attestation-collector.git
-      ref: main
-    type: Git
-    contextDir: .
+    type: Binary
   strategy:
     dockerStrategy:
       dockerfilePath: Dockerfile.sidecar
     type: Docker
   successfulBuildsHistoryLimit: 5
   triggers:
-  - github:
-      secret: secure-sidecar-webhook-secret
-    type: GitHub
   - generic:
       secret: secure-sidecar-generic-secret
     type: Generic

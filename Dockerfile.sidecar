@@ -1,20 +1,54 @@
-# Attestation Reporter Sidecar
-# Build stage
-FROM golang:1.21-alpine AS builder
+# Secure Attestation Sidecar - KBS JWT verification + mTLS client
+FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
 
-WORKDIR /build
+# Set working directory
+WORKDIR /opt/app-root/src
 
-COPY sidecar/main.go ./
-RUN go mod init attestation-sidecar && \
-    CGO_ENABLED=0 GOOS=linux go build -ldflags="-w -s" -o attestation-reporter .
+# Copy go mod files
+COPY go.mod go.sum ./
 
-# Runtime stage - minimal image
-FROM alpine:latest
+# Download dependencies
+RUN go mod download
 
-RUN apk --no-cache add ca-certificates
+# Copy source code
+COPY . .
 
+# Build the sidecar application
+RUN cd sidecar && go build -o coco-beacon-sidecar .
+
+# Final stage - use UBI9 minimal for security
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Install ca-certificates and curl for health checks
+RUN microdnf update -y && microdnf install -y ca-certificates curl && microdnf clean all
+
+# Create non-root user
+RUN useradd -r -u 1001 -g root beacon
+
+# Set working directory
 WORKDIR /app
 
-COPY --from=builder /build/attestation-reporter .
+# Copy binary from builder stage
+COPY --from=builder /opt/app-root/src/sidecar/coco-beacon-sidecar .
 
-ENTRYPOINT ["/app/attestation-reporter"]
+# Create directories for certificates and keys (to be mounted)
+RUN mkdir -p /etc/certs /run/attestation-sidecar && \
+    chown beacon:root /etc/certs /run/attestation-sidecar
+
+# Switch to non-root user
+USER beacon
+
+# Health check - check if process is running
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD pgrep -f coco-beacon-sidecar || exit 1
+
+# Set environment defaults
+ENV COLLECTOR_URL="https://attestation-collector:8443" \
+    TEE_TYPE="tdx" \
+    REPORT_INTERVAL="30" \
+    CLIENT_CERT_FILE="/etc/certs/client.crt" \
+    CLIENT_KEY_FILE="/etc/certs/client.key" \
+    CA_CERT_FILE="/etc/certs/ca.crt"
+
+# Run the sidecar
+ENTRYPOINT ["./coco-beacon-sidecar"]

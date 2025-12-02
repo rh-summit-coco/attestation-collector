@@ -54,7 +54,7 @@ EOF
 
 # Generate server certificate
 echo "🏆 Generating server certificate..."
-openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem -out server-cert.pem -extensions server_ext -extfile server-extfile.cnf -CAcreateserial
+openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem -out server-cert.pem -extfile server-extfile.cnf -CAcreateserial
 
 # Generate client private key
 echo "🔑 Generating client private key..."
@@ -74,7 +74,7 @@ EOF
 
 # Generate client certificate
 echo "🏆 Generating client certificate..."
-openssl x509 -req -days 365 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem -out client-cert.pem -extensions client_ext -extfile client-extfile.cnf -CAcreateserial
+openssl x509 -req -days 365 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem -out client-cert.pem -extfile client-extfile.cnf -CAcreateserial
 
 # Create OpenShift secrets
 echo "☸️  Creating OpenShift secrets..."
