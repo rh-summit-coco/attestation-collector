@@ -1,8 +1,11 @@
 # Secure Attestation Sidecar - KBS JWT verification + mTLS client
-FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
+FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+
+# Install Go
+RUN dnf install -y go git && dnf clean all
 
 # Set working directory
-WORKDIR /opt/app-root/src
+WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -19,8 +22,8 @@ RUN cd sidecar && go build -o coco-beacon-sidecar .
 # Final stage - use UBI9 minimal for security
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
-# Install ca-certificates and curl for health checks
-RUN microdnf update -y && microdnf install -y ca-certificates curl && microdnf clean all
+# Install ca-certificates (curl-minimal already installed in ubi-minimal)
+RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
 
 # Create non-root user
 RUN useradd -r -u 1001 -g root beacon
@@ -29,7 +32,7 @@ RUN useradd -r -u 1001 -g root beacon
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /opt/app-root/src/sidecar/coco-beacon-sidecar .
+COPY --from=builder /app/sidecar/coco-beacon-sidecar .
 
 # Create directories for certificates and keys (to be mounted)
 RUN mkdir -p /etc/certs /run/attestation-sidecar && \
@@ -46,6 +49,7 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
 ENV COLLECTOR_URL="https://attestation-collector:8443" \
     TEE_TYPE="tdx" \
     REPORT_INTERVAL="30" \
+    USE_MTLS="true" \
     CLIENT_CERT_FILE="/etc/certs/client.crt" \
     CLIENT_KEY_FILE="/etc/certs/client.key" \
     CA_CERT_FILE="/etc/certs/ca.crt"

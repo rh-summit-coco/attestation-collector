@@ -64,6 +64,7 @@ func main() {
 	namespace := getEnv("POD_NAMESPACE", "default")
 	teeType := getEnv("TEE_TYPE", "tdx")
 	intervalStr := getEnv("REPORT_INTERVAL", "30")
+	useMTLS := getEnv("USE_MTLS", "true") == "true"
 
 	var interval int
 	fmt.Sscanf(intervalStr, "%d", &interval)
@@ -76,14 +77,27 @@ func main() {
 	log.Printf("  Pod: %s/%s", namespace, podName)
 	log.Printf("  TEE Type: %s", teeType)
 	log.Printf("  Report Interval: %ds", interval)
+	log.Printf("  mTLS Enabled: %v", useMTLS)
+
+	// Select reporting function based on mTLS setting
+	reportFunc := sendReport
+	if useMTLS {
+		reportFunc = func(url, pod, ns, tee string) {
+			if err := sendSecureReport(url, pod, ns, tee); err != nil {
+				log.Printf("Failed to send secure report: %v", err)
+			} else {
+				log.Printf("Secure report sent successfully via mTLS")
+			}
+		}
+	}
 
 	// Initial report
-	sendReport(collectorURL, podName, namespace, teeType)
+	reportFunc(collectorURL, podName, namespace, teeType)
 
 	// Periodic reporting
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	for range ticker.C {
-		sendReport(collectorURL, podName, namespace, teeType)
+		reportFunc(collectorURL, podName, namespace, teeType)
 	}
 }
 

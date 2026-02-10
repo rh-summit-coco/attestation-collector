@@ -1,0 +1,39 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: attestation-collector-enhanced
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-enhanced
+spec:
+  output:
+    to:
+      kind: ImageStreamTag
+      name: attestation-collector-enhanced:latest
+  source:
+    type: Binary
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.collector-enhanced
+  resources:
+    limits:
+      cpu: 500m
+      memory: 1Gi
+    requests:
+      cpu: 100m
+      memory: 256Mi
+  runPolicy: Serial
+  successfulBuildsHistoryLimit: 5
+  failedBuildsHistoryLimit: 5
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: attestation-collector-enhanced
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-enhanced
+spec:
+  lookupPolicy:
+    local: true

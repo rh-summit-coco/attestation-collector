@@ -1,8 +1,11 @@
 # Secure Attestation Collector - mTLS + JWT-signed reports
-FROM registry.access.redhat.com/ubi9/go-toolset:latest AS builder
+FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+
+# Install Go
+RUN dnf install -y go git && dnf clean all
 
 # Set working directory
-WORKDIR /opt/app-root/src
+WORKDIR /app
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -14,12 +17,12 @@ RUN go mod download
 COPY . .
 
 # Build the collector application
-RUN go build -o attestation-collector .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o attestation-collector .
 
 # Final stage - use UBI9 minimal for security
 FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
 
-# Install ca-certificates for TLS
+# Install ca-certificates for TLS (curl-minimal is already included in ubi-minimal)
 RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
 
 # Create non-root user
@@ -29,7 +32,7 @@ RUN useradd -r -u 1001 -g root attestation
 WORKDIR /app
 
 # Copy binary from builder stage
-COPY --from=builder /opt/app-root/src/attestation-collector .
+COPY --from=builder /app/attestation-collector .
 
 # Create directories for certificates (to be mounted)
 RUN mkdir -p /etc/certs && chown attestation:root /etc/certs
@@ -45,7 +48,12 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
   CMD curl -f http://localhost:8080/api/v1/health || exit 1
 
 # Set environment defaults
-ENV PORT=8080
+ENV PORT=8080 \
+    HTTPS_PORT=8443 \
+    ENABLE_MTLS="false" \
+    SERVER_CERT_FILE="/etc/certs/server.crt" \
+    SERVER_KEY_FILE="/etc/certs/server.key" \
+    CA_CERT_FILE="/etc/certs/ca.crt"
 
 # Run the collector
 ENTRYPOINT ["./attestation-collector"]

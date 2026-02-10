@@ -1,0 +1,31 @@
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: attestation-collector-client
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-client
+    app.kubernetes.io/component: collector-client-adapter
+    app.kubernetes.io/instance: attestation-collector-client
+    app.kubernetes.io/name: attestation-collector-client
+spec:
+  failedBuildsHistoryLimit: 5
+  output:
+    to:
+      kind: ImageStreamTag
+      name: attestation-collector-client:latest
+  postCommit: {}
+  resources: {}
+  runPolicy: Serial
+  source:
+    type: Binary
+  strategy:
+    dockerStrategy:
+      dockerfilePath: Dockerfile.collector-client
+    type: Docker
+  successfulBuildsHistoryLimit: 5
+  triggers:
+  - generic:
+      secret: collector-client-generic-secret
+    type: Generic
+  - type: ConfigChange

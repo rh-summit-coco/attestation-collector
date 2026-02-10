@@ -1,0 +1,51 @@
+# Attestation Collector Client Adapter - UBI9 compatible
+FROM registry.access.redhat.com/ubi9/ubi:latest AS builder
+
+# Install Go
+RUN dnf install -y go git && dnf clean all
+
+# Set working directory
+WORKDIR /app
+
+# Copy go mod files from collector-client
+COPY collector-client/go.mod collector-client/go.sum ./
+RUN go mod download
+
+# Copy collector-client source code
+COPY collector-client/ .
+
+# Build the client binary
+RUN CGO_ENABLED=0 GOOS=linux go build -o attestation-collector-client .
+
+# Runtime stage - use UBI9 minimal for security
+FROM registry.access.redhat.com/ubi9/ubi-minimal:latest
+
+# Install ca-certificates for HTTPS communication (curl-minimal already installed)
+RUN microdnf update -y && microdnf install -y ca-certificates && microdnf clean all
+
+# Create non-root user
+RUN useradd -r -u 1001 -g root collector-client
+
+# Set working directory
+WORKDIR /app
+
+# Copy binary from builder stage
+COPY --from=builder /app/attestation-collector-client .
+
+# Set ownership
+RUN chown collector-client:root /app/attestation-collector-client && chmod +x /app/attestation-collector-client
+
+# Switch to non-root user
+USER collector-client
+
+# Health check - check if process is running
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD pgrep -f attestation-collector-client || exit 1
+
+# Set environment defaults
+ENV SECURE_ACCESS_URL="https://localhost:8443" \
+    COLLECTOR_URL="https://attestation-collector:8443" \
+    REPORT_INTERVAL="30"
+
+# Run the collector client
+ENTRYPOINT ["./attestation-collector-client"]

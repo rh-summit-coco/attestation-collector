@@ -44,6 +44,29 @@ type AttestationReport struct {
 	Error       string       `json:"error,omitempty"`
 }
 
+// EnhancedSecurityReport represents the enhanced report format from secure-access integration
+type EnhancedSecurityReport struct {
+	// Attestation data (from CDH via secure-access)
+	AttestationData struct {
+		Status    string `json:"status"`     // "verified"/"failed"
+		Timestamp string `json:"timestamp"`  // RFC3339
+		Details   string `json:"details"`    // Error details if failed
+	} `json:"attestation_data"`
+
+	// mTLS access control data
+	AccessControlData struct {
+		MTLSEnabled   bool `json:"mtls_enabled"`    // Always true for secure-access
+		CertValid     bool `json:"cert_valid"`      // TLS cert status
+		ClientCAValid bool `json:"client_ca_valid"` // CA cert status
+		HTTPSPort     int  `json:"https_port"`      // Port number
+	} `json:"access_control_data"`
+
+	// Pod metadata
+	PodName   string `json:"pod_name"`
+	Namespace string `json:"namespace"`
+	Timestamp string `json:"timestamp"`
+}
+
 // SignedAttestationReport wraps the report with cryptographic signature
 type SignedAttestationReport struct {
 	Report    AttestationReport `json:"report"`
@@ -64,19 +87,133 @@ var store = &Store{
 	history: make(map[string][]AttestationReport),
 }
 
+// convertEnhancedToStandard converts EnhancedSecurityReport to AttestationReport format
+func convertEnhancedToStandard(enhanced *EnhancedSecurityReport) (*AttestationReport, error) {
+	// Parse timestamp
+	timestamp, err := time.Parse(time.RFC3339, enhanced.Timestamp)
+	if err != nil {
+		timestamp = time.Now()
+	}
+
+	// Determine if attested based on status
+	attested := (enhanced.AttestationData.Status == "verified")
+
+	// Map error details if present and status is failed
+	var errorMsg string
+	if !attested && enhanced.AttestationData.Details != "" {
+		errorMsg = enhanced.AttestationData.Details
+	}
+
+	report := &AttestationReport{
+		PodName:   enhanced.PodName,
+		Namespace: enhanced.Namespace,
+		TEEType:   "secure-access", // Indicate this came from secure-access sidecar
+		Attested:  attested,
+		Timestamp: timestamp,
+		Error:     errorMsg,
+	}
+
+	// Add trust vector if attestation was successful
+	if attested {
+		report.TrustVector = &TrustVector{
+			InstanceIdentity: 3, // Verified identity
+			Configuration:    3, // Verified configuration
+			Executables:      3, // Verified executables
+			FileSystem:       2, // Limited verification
+			Hardware:         3, // TEE hardware verified
+			RuntimeOpaque:    2, // Limited runtime verification
+			StorageOpaque:    2, // Limited storage verification
+			SourcedData:      3, // CDH verified data
+		}
+	}
+
+	return report, nil
+}
+
 func main() {
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
 
+	httpsPort := os.Getenv("HTTPS_PORT")
+	if httpsPort == "" {
+		httpsPort = "8443"
+	}
+
+	// Check if mTLS is enabled
+	enableMTLS := os.Getenv("ENABLE_MTLS") == "true"
+
 	http.HandleFunc("/api/v1/reports", handleReports)
 	http.HandleFunc("/api/v1/reports/", handleReportByKey)
 	http.HandleFunc("/api/v1/health", handleHealth)
 	http.HandleFunc("/api/v1/ready", handleReady)
 
+	// Start mTLS server if enabled
+	if enableMTLS {
+		go func() {
+			if err := startMTLSServer(httpsPort); err != nil {
+				log.Printf("mTLS server error: %v", err)
+			}
+		}()
+	}
+
 	log.Printf("Attestation Collector starting on port %s", port)
+	if enableMTLS {
+		log.Printf("mTLS server enabled on port %s", httpsPort)
+	}
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(http.DefaultServeMux)))
+}
+
+// startMTLSServer starts an HTTPS server with mutual TLS authentication
+func startMTLSServer(port string) error {
+	// Load certificates from environment-specified paths
+	serverCertFile := getEnvOrDefault("SERVER_CERT_FILE", "/etc/certs/server.crt")
+	serverKeyFile := getEnvOrDefault("SERVER_KEY_FILE", "/etc/certs/server.key")
+	caCertFile := getEnvOrDefault("CA_CERT_FILE", "/etc/certs/ca.crt")
+
+	// Load server certificate
+	cert, err := tls.LoadX509KeyPair(serverCertFile, serverKeyFile)
+	if err != nil {
+		return fmt.Errorf("failed to load server certificate: %v", err)
+	}
+
+	// Load CA certificate for client verification
+	caCert, err := os.ReadFile(caCertFile)
+	if err != nil {
+		return fmt.Errorf("failed to read CA certificate: %v", err)
+	}
+
+	caCertPool := x509.NewCertPool()
+	if !caCertPool.AppendCertsFromPEM(caCert) {
+		return fmt.Errorf("failed to parse CA certificate")
+	}
+
+	// Create TLS configuration with mTLS
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caCertPool,
+		MinVersion:   tls.VersionTLS12,
+	}
+
+	// Create server with mTLS
+	server := &http.Server{
+		Addr:      ":" + port,
+		Handler:   corsMiddleware(http.DefaultServeMux),
+		TLSConfig: tlsConfig,
+	}
+
+	log.Printf("mTLS server listening on :%s", port)
+	return server.ListenAndServeTLS("", "")
+}
+
+// getEnvOrDefault returns environment variable value or default
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }
 
 // CORS middleware for dashboard access
@@ -126,34 +263,51 @@ func handlePostReport(w http.ResponseWriter, r *http.Request) {
 	var report AttestationReport
 	var verified bool = false
 
-	// Try to decode as signed report first
-	var signedReport SignedAttestationReport
-	if err := json.Unmarshal(bodyBytes, &signedReport); err == nil &&
-		signedReport.Signature != "" && signedReport.PublicKey != "" {
-		// This is a signed report
-		valid, err := verifySignedAttestationReport(&signedReport)
+	// Try to decode as enhanced security report first (from secure-access)
+	var enhancedReport EnhancedSecurityReport
+	if err := json.Unmarshal(bodyBytes, &enhancedReport); err == nil &&
+		enhancedReport.AttestationData.Status != "" && enhancedReport.PodName != "" {
+		// This is an enhanced security report - convert to standard format
+		convertedReport, err := convertEnhancedToStandard(&enhancedReport)
 		if err != nil {
-			log.Printf("Signature verification error: %v", err)
-			http.Error(w, fmt.Sprintf("Signature verification failed: %v", err), http.StatusBadRequest)
+			log.Printf("Enhanced report conversion error: %v", err)
+			http.Error(w, fmt.Sprintf("Enhanced report conversion failed: %v", err), http.StatusBadRequest)
 			return
 		}
-
-		if !valid {
-			log.Printf("Invalid signature for report from %s/%s", signedReport.Report.Namespace, signedReport.Report.PodName)
-			http.Error(w, "Invalid signature", http.StatusUnauthorized)
-			return
-		}
-
-		report = signedReport.Report
-		verified = true
-		log.Printf("Signature verified for %s/%s", report.Namespace, report.PodName)
+		report = *convertedReport
+		verified = false // Enhanced reports are not cryptographically signed
+		log.Printf("Received enhanced security report from %s/%s (status: %s)",
+			report.Namespace, report.PodName, enhancedReport.AttestationData.Status)
 	} else {
-		// Try as plain report (backward compatibility)
-		if err := json.Unmarshal(bodyBytes, &report); err != nil {
-			http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
-			return
+		// Try to decode as signed report
+		var signedReport SignedAttestationReport
+		if err := json.Unmarshal(bodyBytes, &signedReport); err == nil &&
+			signedReport.Signature != "" && signedReport.PublicKey != "" {
+			// This is a signed report
+			valid, err := verifySignedAttestationReport(&signedReport)
+			if err != nil {
+				log.Printf("Signature verification error: %v", err)
+				http.Error(w, fmt.Sprintf("Signature verification failed: %v", err), http.StatusBadRequest)
+				return
+			}
+
+			if !valid {
+				log.Printf("Invalid signature for report from %s/%s", signedReport.Report.Namespace, signedReport.Report.PodName)
+				http.Error(w, "Invalid signature", http.StatusUnauthorized)
+				return
+			}
+
+			report = signedReport.Report
+			verified = true
+			log.Printf("Signature verified for %s/%s", report.Namespace, report.PodName)
+		} else {
+			// Try as plain report (backward compatibility)
+			if err := json.Unmarshal(bodyBytes, &report); err != nil {
+				http.Error(w, fmt.Sprintf("Invalid JSON: %v", err), http.StatusBadRequest)
+				return
+			}
+			log.Printf("Warning: Received unsigned report from %s/%s", report.Namespace, report.PodName)
 		}
-		log.Printf("Warning: Received unsigned report from %s/%s", report.Namespace, report.PodName)
 	}
 
 	if report.PodName == "" || report.Namespace == "" {

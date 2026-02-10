@@ -1,0 +1,36 @@
+# Build the enhanced attestation collector with enhanced report format support
+FROM registry.access.redhat.com/ubi9/ubi:latest
+
+# Install dependencies
+RUN dnf update -y && \
+    dnf install -y go git && \
+    dnf clean all
+
+# Set up work directory
+WORKDIR /opt/app-root/src
+
+# Copy source code
+COPY main.go ./
+COPY go.mod go.sum ./
+
+# Build the application
+RUN go mod tidy && \
+    go build -o attestation-collector main.go
+
+# Create app user for security
+RUN useradd -r -s /bin/false appuser && \
+    chown -R appuser:appuser /opt/app-root/src && \
+    chmod +x attestation-collector
+
+# Switch to non-root user
+USER appuser
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8080/api/v1/health || exit 1
+
+# Expose port
+EXPOSE 8080
+
+# Run the application
+CMD ["./attestation-collector"]

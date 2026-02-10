@@ -1,0 +1,43 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: attestation-collector-client
+  namespace: raj-compliance-dashboard
+  labels:
+    app: attestation-collector-client
+    app.kubernetes.io/name: attestation-collector-client
+    app.kubernetes.io/component: collector-client
+    app.kubernetes.io/part-of: coco-compliance
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: attestation-collector-client
+  template:
+    metadata:
+      labels:
+        app: attestation-collector-client
+    spec:
+      containers:
+      - name: collector-client
+        image: image-registry.openshift-image-registry.svc:5000/raj-compliance-dashboard/attestation-collector-client:latest
+        env:
+        - name: COLLECTOR_URL
+          value: "http://attestation-collector:8080"
+        - name: REPORT_INTERVAL
+          value: "30"
+        # Multi-target configuration: CoCo sidecar on OpenShift + RHEL CVM
+        # Note: Uses internal HTTP port 8081 (no mTLS) for cluster-internal polling
+        # RHEL CVM: Standalone Azure confidential VM with SEV-SNP
+        - name: TARGETS
+          value: '[{"name":"janine-hospital-coco","url":"http://test-cococtl-sidecar.janine-app.svc.cluster.local:8081","type":"coco-sidecar","namespace":"janine-app"},{"name":"rhel-cvm-attestation","url":"http://10.1.6.6:8081","type":"rhel-cvm","namespace":"rhel-cvm"}]'
+        resources:
+          requests:
+            memory: "32Mi"
+            cpu: "10m"
+          limits:
+            memory: "64Mi"
+            cpu: "100m"
+      securityContext:
+        runAsNonRoot: true
+      serviceAccountName: default
