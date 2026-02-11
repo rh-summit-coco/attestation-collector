@@ -267,7 +267,7 @@ func verifyAndParseKBSToken(tokenString string) (*TrustVector, error) {
 	pubKey, err := getKBSPublicKey()
 	if err != nil {
 		// If we can't get public key, fall back to basic validation
-		log.Printf("Warning: Could not verify token signature: %v", err)
+		// log.Printf("Warning: Could not verify token signature: %v", err)
 		return parseTokenClaims(token)
 	}
 
