@@ -51,9 +51,9 @@ type AttestationReport struct {
 // SignedAttestationReport wraps the report with cryptographic signature
 type SignedAttestationReport struct {
 	Report    AttestationReport `json:"report"`
-	Signature string           `json:"signature"`
-	PublicKey string           `json:"public_key_pem"`
-	Algorithm string           `json:"algorithm"`
+	Signature string            `json:"signature"`
+	PublicKey string            `json:"public_key_pem"`
+	Algorithm string            `json:"algorithm"`
 }
 
 func main() {
@@ -62,7 +62,7 @@ func main() {
 	collectorURL := getEnv("COLLECTOR_URL", "https://attestation-collector.raj-compliance-dashboard:8443")
 	podName := getEnv("POD_NAME", "unknown")
 	namespace := getEnv("POD_NAMESPACE", "default")
-	teeType := getEnv("TEE_TYPE", "tdx")
+	teeType := getEnv("TEE_TYPE", "snp")
 	intervalStr := getEnv("REPORT_INTERVAL", "30")
 	useMTLS := getEnv("USE_MTLS", "true") == "true"
 
@@ -159,38 +159,82 @@ func getEnv(key, defaultValue string) string {
 	return defaultValue
 }
 
-// getKBSToken looks for KBS JWT token in standard CoCo locations
+// normalizeKBSToken extracts a raw JWT from common wrappers (JSON, "Bearer ...", multi-line).
+// A valid JWT has exactly 3 dot-separated segments; if the source returns JSON or other format, we extract the token.
+func normalizeKBSToken(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	// Bearer prefix (e.g. from HTTP headers)
+	if s, ok := strings.CutPrefix(raw, "Bearer "); ok {
+		raw = strings.TrimSpace(s)
+	}
+	// JSON wrapper (e.g. CDH or some KBS endpoints return {"token": "eyJ..."})
+	if strings.HasPrefix(raw, "{") {
+		var m map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &m); err == nil {
+			for _, key := range []string{"token", "jwt", "value", "access_token"} {
+				if v, ok := m[key]; ok {
+					if s, ok := v.(string); ok && s != "" {
+						return strings.TrimSpace(s)
+					}
+				}
+			}
+		}
+	}
+	// Multi-line: use first line (JWT is single line)
+	if idx := strings.Index(raw, "\n"); idx >= 0 {
+		raw = strings.TrimSpace(raw[:idx])
+	}
+	return raw
+}
+
+// kbsTokenEnvVars lists environment variable names checked for the KBS/EAR JWT (first non-empty wins).
+var kbsTokenEnvVars = []string{"KBS_TOKEN", "EAR_TOKEN", "ATTESTATION_TOKEN"}
+
+// kbsTokenPaths lists file paths where the sidecar looks for the KBS/EAR JWT (e.g. mounted by CoCo/Trustee).
+var kbsTokenPaths = []string{
+	"/run/confidential-containers/kbs-token",
+	"/run/attestation-agent/token",
+	"/tmp/attestation/kbs-token",
+	"/run/kbs/token",
+}
+
+// getKBSToken looks for KBS JWT token in standard CoCo/Trustee locations
 func getKBSToken() (string, error) {
-	// Standard locations where attestation-agent stores KBS tokens
-	tokenPaths := []string{
-		"/run/confidential-containers/kbs-token",
-		"/run/attestation-agent/token",
-		"/tmp/attestation/kbs-token",
-	}
-
-	// Check environment variable first
-	if token := os.Getenv("KBS_TOKEN"); token != "" {
-		return token, nil
-	}
-
-	// Check standard file locations
-	for _, path := range tokenPaths {
-		if data, err := ioutil.ReadFile(path); err == nil {
-			return strings.TrimSpace(string(data)), nil
+	// Check environment variables first
+	for _, name := range kbsTokenEnvVars {
+		if token := normalizeKBSToken(os.Getenv(name)); token != "" {
+			return token, nil
 		}
 	}
 
-	// Try CDH endpoint to get current token
+	// Check standard file locations (e.g. volume mounts from attestation flow)
+	for _, path := range kbsTokenPaths {
+		if data, err := ioutil.ReadFile(path); err == nil {
+			if token := normalizeKBSToken(string(data)); token != "" {
+				return token, nil
+			}
+		}
+	}
+
+	// Try CoCo api-server-rest / attestation-agent token endpoint (guest-components)
+	kbsTokenURL := getEnv("KBS_TOKEN_URL", "http://127.0.0.1:8006/aa/token?token_type=kbs")
 	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:8006/kbs/token")
+	resp, err := client.Get(kbsTokenURL)
 	if err == nil {
 		defer resp.Body.Close()
 		if body, err := ioutil.ReadAll(resp.Body); err == nil {
-			return strings.TrimSpace(string(body)), nil
+			if token := normalizeKBSToken(string(body)); token != "" {
+				return token, nil
+			}
 		}
 	}
 
-	return "", fmt.Errorf("no KBS token found in standard locations")
+	log.Printf("No KBS token found: set one of env %v, or mount a JWT at one of %v, or ensure %s is available", kbsTokenEnvVars, kbsTokenPaths, kbsTokenURL)
+
+	return "", fmt.Errorf("no KBS token found: set one of env %v, or mount a JWT at one of %v, or ensure %s is available", kbsTokenEnvVars, kbsTokenPaths, kbsTokenURL)
 }
 
 // KBSClaims represents the JWT claims from Trustee KBS
@@ -207,6 +251,12 @@ type EARClaims struct {
 
 // verifyAndParseKBSToken validates JWT signature and extracts trust vector
 func verifyAndParseKBSToken(tokenString string) (*TrustVector, error) {
+	tokenString = strings.TrimSpace(tokenString)
+	// JWT must have exactly 3 dot-separated segments (header.payload.signature)
+	segments := strings.Split(tokenString, ".")
+	if len(segments) != 3 {
+		return nil, fmt.Errorf("token is not a valid JWT (got %d segments, need 3); check KBS_TOKEN or token file/CDH response format", len(segments))
+	}
 	// Parse token without verification first to get header
 	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, &KBSClaims{})
 	if err != nil {
@@ -448,8 +498,8 @@ func createMTLSClient(clientCertFile, clientKeyFile, caCertFile string) (*http.C
 	// Create TLS configuration
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{clientCert},
-		RootCAs:     caCertPool,
-		MinVersion:  tls.VersionTLS12,
+		RootCAs:      caCertPool,
+		MinVersion:   tls.VersionTLS12,
 	}
 
 	// Create HTTP client with mTLS

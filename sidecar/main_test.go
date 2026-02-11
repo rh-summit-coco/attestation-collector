@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"io/ioutil"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,9 +68,11 @@ func TestGetKBSToken_NotFound(t *testing.T) {
 		t.Fatalf("Expected error when no token found")
 	}
 
-	expected := "no KBS token found in standard locations"
-	if err.Error() != expected {
-		t.Fatalf("Expected error: %s, got: %s", expected, err.Error())
+	if !strings.Contains(err.Error(), "no KBS token found") {
+		t.Fatalf("Expected error to contain 'no KBS token found', got: %s", err.Error())
+	}
+	if !strings.Contains(err.Error(), "KBS_TOKEN") {
+		t.Fatalf("Expected error to mention how to supply token (e.g. KBS_TOKEN), got: %s", err.Error())
 	}
 }
 
@@ -85,9 +88,9 @@ func TestParseTokenClaims(t *testing.T) {
 		TEE: "tdx",
 		EAR: &EARClaims{
 			TrustVector: map[string]int{
-				"hardware":     2,
-				"configuration": 2,
-				"executables":   1,
+				"hardware":          2,
+				"configuration":     2,
+				"executables":       1,
 				"instance-identity": 0,
 			},
 		},
@@ -123,7 +126,7 @@ func TestParseTokenClaims_Expired(t *testing.T) {
 	claims := &KBSClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(now.Add(-time.Hour)), // Expired 1 hour ago
-			IssuedAt:  jwt.NewNumericDate(now.Add(-2*time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(now.Add(-2 * time.Hour)),
 		},
 		TEE: "tdx",
 	}
@@ -191,7 +194,7 @@ func TestVerifyAndParseKBSToken_ValidToken(t *testing.T) {
 		TEE: "tdx",
 		EAR: &EARClaims{
 			TrustVector: map[string]int{
-				"hardware":     2,
+				"hardware":      2,
 				"configuration": 2,
 			},
 		},
