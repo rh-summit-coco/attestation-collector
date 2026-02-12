@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -87,6 +88,9 @@ var store = &Store{
 	history: make(map[string][]AttestationReport),
 }
 
+// reportTTL is how long a report is considered live; older reports are excluded from API responses (no sidecar = no refresh).
+var reportTTL time.Duration
+
 // convertEnhancedToStandard converts EnhancedSecurityReport to AttestationReport format
 func convertEnhancedToStandard(enhanced *EnhancedSecurityReport) (*AttestationReport, error) {
 	// Parse timestamp
@@ -143,6 +147,15 @@ func main() {
 
 	// Check if mTLS is enabled
 	enableMTLS := os.Getenv("ENABLE_MTLS") == "true"
+
+	// Report TTL: reports older than this are excluded from GET (dashboard won't see them). Prevents showing stale reports when no sidecar is connected.
+	reportTTL = 90 * time.Second
+	if s := os.Getenv("REPORT_TTL_SECONDS"); s != "" {
+		if sec, err := strconv.Atoi(s); err == nil && sec > 0 {
+			reportTTL = time.Duration(sec) * time.Second
+		}
+	}
+	log.Printf("Report TTL: %v (reports older than this are hidden from API)", reportTTL)
 
 	http.HandleFunc("/api/v1/reports", handleReports)
 	http.HandleFunc("/api/v1/reports/", handleReportByKey)
@@ -350,12 +363,29 @@ func handlePostReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetReports(w http.ResponseWriter, r *http.Request) {
+	now := time.Now()
 	store.mu.RLock()
 	reports := make([]AttestationReport, 0, len(store.reports))
-	for _, report := range store.reports {
-		reports = append(reports, report)
+	var expiredKeys []string
+	for key, report := range store.reports {
+		if reportTTL > 0 && now.Sub(report.Timestamp) > reportTTL {
+			expiredKeys = append(expiredKeys, key)
+		} else {
+			reports = append(reports, report)
+		}
 	}
 	store.mu.RUnlock()
+
+	// Remove expired reports from store when TTL is enabled (reportTTL > 0)
+	if reportTTL > 0 && len(expiredKeys) > 0 {
+		store.mu.Lock()
+		for _, key := range expiredKeys {
+			delete(store.reports, key)
+			delete(store.history, key)
+		}
+		store.mu.Unlock()
+		log.Printf("Expired %d report(s) (no refresh within TTL)", len(expiredKeys))
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reports)
@@ -398,24 +428,36 @@ func handleReportByKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	store.mu.RLock()
-	defer store.mu.RUnlock()
-
 	if isHistory {
 		history, exists := store.history[path]
 		if !exists {
+			store.mu.RUnlock()
 			http.Error(w, "Not found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(history)
+		store.mu.RUnlock()
 		return
 	}
 
 	report, exists := store.reports[path]
 	if !exists {
+		store.mu.RUnlock()
 		http.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
+	if reportTTL > 0 && time.Since(report.Timestamp) > reportTTL {
+		store.mu.RUnlock()
+		// Remove expired report
+		store.mu.Lock()
+		delete(store.reports, path)
+		delete(store.history, path)
+		store.mu.Unlock()
+		http.Error(w, "Not found", http.StatusNotFound)
+		return
+	}
+	store.mu.RUnlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(report)
