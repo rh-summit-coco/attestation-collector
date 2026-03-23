@@ -155,7 +155,9 @@ func main() {
 			reportTTL = time.Duration(sec) * time.Second
 		}
 	}
-	log.Printf("Report TTL: %v (reports older than this are hidden from API)", reportTTL)
+	log.Printf("Report TTL: %v (reports older than this are removed from the store)", reportTTL)
+
+	startExpiredReportPurger()
 
 	http.HandleFunc("/api/v1/reports", handleReports)
 	http.HandleFunc("/api/v1/reports/", handleReportByKey)
@@ -176,6 +178,53 @@ func main() {
 		log.Printf("mTLS server enabled on port %s", httpsPort)
 	}
 	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(http.DefaultServeMux)))
+}
+
+// startExpiredReportPurger removes stale reports on a timer so they are not only deleted when
+// something calls GET /api/v1/reports (dashboards may only poll occasionally or use other paths).
+func startExpiredReportPurger() {
+	if reportTTL <= 0 {
+		return
+	}
+	interval := reportTTL / 2
+	if interval < 15*time.Second {
+		interval = 15 * time.Second
+	}
+	if interval > 2*time.Minute {
+		interval = 2 * time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for range ticker.C {
+			n := purgeExpiredReports()
+			if n > 0 {
+				log.Printf("Purged %d expired report(s) (no POST refresh within %v)", n, reportTTL)
+			}
+		}
+	}()
+	log.Printf("Expired-report purge running every %v", interval)
+}
+
+// purgeExpiredReports deletes reports (and their history) older than reportTTL. Returns count removed.
+func purgeExpiredReports() int {
+	if reportTTL <= 0 {
+		return 0
+	}
+	now := time.Now()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	var expiredKeys []string
+	for key, report := range store.reports {
+		if now.Sub(report.Timestamp) > reportTTL {
+			expiredKeys = append(expiredKeys, key)
+		}
+	}
+	for _, key := range expiredKeys {
+		delete(store.reports, key)
+		delete(store.history, key)
+	}
+	return len(expiredKeys)
 }
 
 // startMTLSServer starts an HTTPS server with mutual TLS authentication
@@ -363,29 +412,14 @@ func handlePostReport(w http.ResponseWriter, r *http.Request) {
 }
 
 func handleGetReports(w http.ResponseWriter, r *http.Request) {
-	now := time.Now()
+	purgeExpiredReports()
+
 	store.mu.RLock()
 	reports := make([]AttestationReport, 0, len(store.reports))
-	var expiredKeys []string
-	for key, report := range store.reports {
-		if reportTTL > 0 && now.Sub(report.Timestamp) > reportTTL {
-			expiredKeys = append(expiredKeys, key)
-		} else {
-			reports = append(reports, report)
-		}
+	for _, report := range store.reports {
+		reports = append(reports, report)
 	}
 	store.mu.RUnlock()
-
-	// Remove expired reports from store when TTL is enabled (reportTTL > 0)
-	if reportTTL > 0 && len(expiredKeys) > 0 {
-		store.mu.Lock()
-		for _, key := range expiredKeys {
-			delete(store.reports, key)
-			delete(store.history, key)
-		}
-		store.mu.Unlock()
-		log.Printf("Expired %d report(s) (no refresh within TTL)", len(expiredKeys))
-	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(reports)
@@ -426,6 +460,8 @@ func handleReportByKey(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
+	purgeExpiredReports()
 
 	store.mu.RLock()
 	if isHistory {
