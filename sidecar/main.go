@@ -219,10 +219,27 @@ func getKBSToken() (string, error) {
 		}
 	}
 
+	kbsStatusURL := getEnv("KBS_TOKEN_URL", "http://127.0.0.1:8006/default/attestation-status/status")
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get(kbsStatusURL)
+	if err != nil {
+		return "", fmt.Errorf("failed to call KBS status endpoint %s: %w", kbsStatusURL, err)
+	}
+	defer resp.Body.Close()
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read KBS status response: %w", err)
+	}
+	bodyText := string(body)
+	if bodyText != "success" {
+		return "", fmt.Errorf("KBS status response is not successful: %s", bodyText)
+	}
+
 	// Try CoCo api-server-rest / attestation-agent token endpoint (guest-components)
 	kbsTokenURL := getEnv("KBS_TOKEN_URL", "http://127.0.0.1:8006/aa/token?token_type=kbs")
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(kbsTokenURL)
+	client = &http.Client{Timeout: 5 * time.Second}
+	resp, err = client.Get(kbsTokenURL)
 	if err == nil {
 		defer resp.Body.Close()
 		if body, err := ioutil.ReadAll(resp.Body); err == nil {
@@ -232,9 +249,7 @@ func getKBSToken() (string, error) {
 		}
 	}
 
-	log.Printf("No KBS token found: set one of env %v, or mount a JWT at one of %v, or ensure %s is available", kbsTokenEnvVars, kbsTokenPaths, kbsTokenURL)
-
-	return "", fmt.Errorf("no KBS token found: set one of env %v, or mount a JWT at one of %v, or ensure %s is available", kbsTokenEnvVars, kbsTokenPaths, kbsTokenURL)
+	return "", fmt.Errorf("no KBS token found")
 }
 
 // KBSClaims represents the JWT claims from Trustee KBS
